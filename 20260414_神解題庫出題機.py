@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import re
-import math  # 修正：確保導入 math 模組
+import math
 import io
-import os
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, Border, Side
 from openpyxl.utils import get_column_letter
@@ -14,43 +13,35 @@ from docx.shared import Pt, Cm, RGBColor
 from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# PDF 轉換 (僅限本機執行且有安裝 Word 時可用)
-try:
-    from docx2pdf import convert
-    HAS_DOCX2PDF = True
-except ImportError:
-    HAS_DOCX2PDF = False
-
 # 網頁配置
-st.set_page_config(page_title="題庫轉換神器 V10", page_icon="📝", layout="centered")
+st.set_page_config(page_title="題庫轉換神器 V11", page_icon="📝", layout="centered")
 
-st.title("📝 題庫轉換 Web 旗艦版")
-st.markdown("支援：自動偵測選項數、詳解全紫排版、出處標註、Excel 自動列高")
+st.title("📝 題庫轉換 Web 版")
+st.markdown("已移除 PDF 功能。支援：自動偵測選項數、詳解全紫排版、出處標註、Excel 自動列高")
 
 # ==================== UI 介面 ====================
 uploaded_file = st.file_uploader("選取原始題庫 (.xlsx)", type=["xlsx"])
 
 col1, col2 = st.columns(2)
 with col1:
-    exam_title = st.text_input("考卷標題 (Word 大標題)", "113年 專業科目測驗")
+    exam_title_input = st.text_input("考卷標題 (Word 大標題)", "113年 專業科目測驗")
 with col2:
-    excel_filename = st.text_input("Excel 輸出檔名", "精修題庫資料")
+    excel_filename_input = st.text_input("Excel 輸出檔名", "精修題庫資料")
 
-enable_pdf = False
-if HAS_DOCX2PDF:
-    st.info("💡 偵測到環境支援 PDF 轉檔 (僅限本機執行)")
-    enable_pdf = st.checkbox("同步產出 PDF 檔案", value=False)
-else:
-    st.warning("⚠️ 目前環境不支援自動轉 PDF (雲端伺服器限制)。建議下載 Word 後手動另存為 PDF。")
+# 強制確保輸入不為 None
+exam_title = str(exam_title_input) if exam_title_input else "測驗題庫"
+excel_filename = str(excel_filename_input) if excel_filename_input else "精修題庫"
 
 def sanitize(name):
-    return re.sub(r'[\\/:*?"<>|]', '_', str(name))
+    # 確保輸入是字串且移除非法字元
+    name = str(name)
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
 
 # ==================== 處理邏輯 ====================
 if uploaded_file is not None:
     if st.button("🚀 開始轉換資料", use_container_width=True):
         try:
-            # 1. 讀取與偵測格式
+            # 1. 智慧讀取 Excel
             df_raw = pd.read_excel(uploaded_file, header=None)
             header_idx = -1
             for i, row in df_raw.iterrows():
@@ -78,12 +69,14 @@ if uploaded_file is not None:
             opt_labels = [chr(65 + i) for i in range(max_opts)]
 
             processed_rows = []
-            def clean(t): return str(t).strip() if pd.notna(t) else ""
+            def clean(t): 
+                if pd.isna(t): return ""
+                return str(t).strip().replace('$', '')
 
             # 3. 資料整理
             for i, row in df.iterrows():
                 q_txt = clean(row.get(q_col, ""))
-                if not q_txt: continue
+                if not q_txt or q_txt.lower() == "nan": continue # 避免抓到空行或標題
                 
                 row_dict = {'題號': len(processed_rows) + 1, '題目內容': q_txt}
                 for idx, lbl in enumerate(opt_labels):
@@ -96,6 +89,10 @@ if uploaded_file is not None:
                 row_dict['出處'] = clean(row.get(src_col, ""))
                 processed_rows.append(row_dict)
 
+            if not processed_rows:
+                st.error("❌ 找不到有效的題目資料，請確認 Excel 內容。")
+                st.stop()
+
             # ==================== 產出 Excel ====================
             output_df = pd.DataFrame(processed_rows)
             excel_out = io.BytesIO()
@@ -105,7 +102,7 @@ if uploaded_file is not None:
             wb = load_workbook(excel_out)
             ws = wb.active
             
-            # 動態設定欄寬與格式
+            # 動態設定欄寬
             ans_idx = 3 + max_opts
             col_widths = {'A': 8, 'B': 45}
             for i in range(max_opts): col_widths[get_column_letter(3+i)] = 30
@@ -129,7 +126,6 @@ if uploaded_file is not None:
                     if cell.column_letter in ['A', get_column_letter(ans_idx)]:
                         cell.alignment = Alignment(horizontal='center', vertical='center')
                     
-                    # 計算列高
                     cw = col_widths.get(cell.column_letter, 20)
                     est = math.ceil((len(str(cell.value)) * 1.8) / cw)
                     if est > max_h_lines: max_h_lines = est
@@ -167,7 +163,7 @@ if uploaded_file is not None:
                 ans_p.add_run(f"({r['正確答案']})")
 
                 expl = str(r['針對各選項之詳解'])
-                if expl and expl != "nan":
+                if expl and expl.lower() != "nan" and expl.strip():
                     h = doc.add_paragraph()
                     h.paragraph_format.space_before, h.paragraph_format.space_after = Pt(4), Pt(0)
                     run = h.add_run("詳解 :"); run.bold, run.font.color.rgb = True, PURPLE
@@ -182,7 +178,7 @@ if uploaded_file is not None:
                             lp.add_run(line.strip()).font.color.rgb = PURPLE
                 
                 src = str(r['出處'])
-                if src and src != "nan":
+                if src and src.lower() != "nan" and src.strip():
                     sp = doc.add_paragraph(); sp.paragraph_format.space_before = Pt(2)
                     rl = sp.add_run("出處 : "); rl.bold, rl.font.color.rgb = True, BLUE
                     sp.add_run(src).font.color.rgb = BLUE
@@ -197,4 +193,5 @@ if uploaded_file is not None:
             st.download_button("📄 下載 Word 考卷", word_out.getvalue(), f"{sanitize(exam_title)}.docx")
 
         except Exception as e:
-            st.error(f"轉換過程出錯：{e}")
+            st.error(f"轉換過程出錯（建議檢查 Excel 格式）：{e}")
+            st.exception(e) # 這會顯示詳細錯誤，方便除錯
